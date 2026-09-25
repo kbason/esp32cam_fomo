@@ -1,0 +1,19 @@
+# ESP-IDF
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+
+# Dataset (duzy, trzymany poza repo)
+dataset/
+*.jpg
+
+# Python
+__pycache__/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
