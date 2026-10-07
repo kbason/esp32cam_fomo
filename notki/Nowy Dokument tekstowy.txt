@@ -1,0 +1,46 @@
+Wszystkie zmiany są w [sdkconfig.defaults](sdkconfig.defaults), kodu nie ruszałem.
+
+## 1. Szybszy procesor
+`CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y`. Procesor chodził na 160 MHz, a ESP32 obsługuje 240 MHz. Sieć to głównie mnożenia i dodawania, więc wyższe taktowanie przyspiesza ją mniej więcej proporcjonalnie, nawet o ok. 1,5×. Minus: większy pobór prądu, a przy słabym zasilaniu ESP32-CAM może się restartować (brownout).
+
+## 2. Szybszy flash
+`CONFIG_ESPTOOLPY_FLASHMODE_QIO=y`. Wagi modelu i kod programu leżą we flashu, a procesor czyta je przez cache. Tryb był DIO, czyli 2 linie danych. QIO używa 4 linii, więc odczyt jest około dwa razy szybszy. Szybkość 80 MHz już była ustawiona.
+
+## 3. PSRAM
+PSRAM już chodził na 80 MHz, więc nic nie zmieniałem. Twój układ to rewizja ≥3, więc obejście sprzętowego błędu cache PSRAM jest wyłączone i niczego nie spowalnia.
+
+## 4. Kompilator
+- Optymalizacja `-O2` pod szybkość (`OPTIMIZATION_PERF`) była już włączona.
+- Wyłączyłem asercje (`ASSERTIONS_DISABLE`). To sprawdzenia w kodzie, które kosztują trochę czasu przy każdym wywołaniu.
+
+## 5. Drobiazgi
+- `FREERTOS_HZ=1000`: system przełącza zadania dokładniej. Na samą sieć wpływ jest znikomy.
+- Logi na poziomie WARN: mniej czasu traci się na wysyłanie tekstu przez UART.
+- Opcji rozmiaru cache, które najpierw dopisałem, nie ma w tej wersji ESP-IDF, więc je usunąłem.
+
+## 6. Arena modelu w RAM zamiast w PSRAM (najważniejsza zmiana dla sieci)
+Arena (tensor arena) to bufor roboczy sieci. Trzyma wyniki pośrednie każdej warstwy, a sieć czyta go i zapisuje non stop.
+
+- Wewnętrzny RAM jest w chipie i bardzo szybki.
+- PSRAM to osobny układ podłączony po SPI. Jest dużo wolniejszy, a każdy dostęp spoza cache kosztuje.
+
+Edge Impulse alokuje arenę zwykłym `malloc`. Przy `CONFIG_SPIRAM_USE_MALLOC=y` system sam decyduje, gdzie trafia blok:
+- bloki do 16 KB trafiają do RAM-u,
+- większe bloki trafiają do PSRAM.
+
+Arena Twojego modelu ma ok. 58 KB, więc lądowała w wolnym PSRAM. Podniosłem ten próg:
+
+```
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=65536
+```
+
+Teraz bloki do 64 KB idą do RAM-u, więc arena też. Bufor kamery dalej jest w PSRAM, bo ma to jawnie ustawione (`CAMERA_FB_IN_PSRAM`). Jest też mały, więc nie przeszkadza.
+
+Minus: zostaje mniej wewnętrznego RAM-u dla Wi-Fi i stosów zadań. Przy błędach alokacji można obniżyć próg, ale musi zostać powyżej 58163, bo inaczej arena wróci do PSRAM.
+
+## Co dalej
+1. Usuń `sdkconfig` i zbuduj od nowa (`idf.py fullclean build`). Bez tego stary sdkconfig zostaje i zmiany nie działają.
+2. Po uruchomieniu sprawdź log „pamiec zajeta przez 1. inferencje” ([main.cpp:200](main/main.cpp#L200)). Arena powinna zająć RAM (internal), a nie PSRAM.
+3. Porównaj czas inferencji przed zmianami i po nich.
+
+Jedna rzecz, której nie zmieniałem: w [main/CMakeLists.txt](main/CMakeLists.txt) jest `-Og` dla `main.cpp`. To tryb pod debugowanie i spowalnia tylko Twój kod w `main.cpp`, nie samą sieć. Sieć jest w komponencie Edge Impulse. Jeśli `main.cpp` robi coś cięższego, np. skalowanie klatki, warto tę linię usunąć.
