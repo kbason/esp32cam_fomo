@@ -5,15 +5,12 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_camera.h"
-#include "mbedtls/base64.h"
 #include "edge-impulse-sdk/classifier/ei_run_classifier.h"
 
 static const char *TAG = "fomo";
 
-// Podglad klatki po UART: 0 = wylaczony (najszybciej), N > 0 = wysylaj co N-ta klatke.
-// Wysylana jest klatka w rozmiarze modelu (EI_CLASSIFIER_INPUT_WIDTH x HEIGHT).
-// Przy 96x96 to ok. 12 kB base64, przy 115200 baud ~1,1 s transmisji.
-#define PREVIEW_EVERY_N_FRAMES 2
+// Podglad przez WiFi (wifi_preview.cpp): wpisz w przegladarce IP z logu.
+#include "wifi_preview.h"
 
 // Kamera zawsze pracuje w 96x96 (najmniejszy rozmiar w sterowniku esp32-camera).
 // Jesli model ma inne wejscie (np. 48x48), klatka jest skalowana programowo,
@@ -75,18 +72,15 @@ static esp_err_t camera_init(void)
 }
 
 // bufor wejsciowy dla EI (float, 0xRRGGBB na piksel; dla grayscale R=G=B)
-static float ei_buf[EI_W * EI_H];
+// (w PSRAM: 96x96x4 B = 36 kB, szkoda na to wewnetrznego RAM-u, ktorego brakuje WiFi)
+static float *ei_buf = nullptr;
 
-#if PREVIEW_EVERY_N_FRAMES > 0
-// kopia surowych bajtow grayscale (po skalowaniu), do podgladu po UART
+// kopia surowych bajtow grayscale (po skalowaniu), do podgladu przez WiFi
 static uint8_t gray_raw[EI_W * EI_H];
-#endif
 
 static inline void store_pixel(int idx, uint8_t g)
 {
-#if PREVIEW_EVERY_N_FRAMES > 0
     gray_raw[idx] = g;
-#endif
     ei_buf[idx] = (float)(((uint32_t)g << 16) | ((uint32_t)g << 8) | g);
 }
 
@@ -124,24 +118,6 @@ static void gray_to_ei(const uint8_t *src, int sw, int sh)
     }
 }
 
-#if PREVIEW_EVERY_N_FRAMES > 0
-static void send_frame_uart(void)
-{
-    size_t out_len = 0;
-    size_t cap = 4 * ((sizeof(gray_raw) + 2) / 3) + 1;
-    unsigned char *b64 = (unsigned char *)malloc(cap);
-    if (!b64) return;
-
-    if (mbedtls_base64_encode(b64, cap, &out_len, gray_raw, sizeof(gray_raw)) == 0) {
-        printf("IMG:");
-        fwrite(b64, 1, out_len, stdout);
-        printf("\n");
-        fflush(stdout);
-    }
-    free(b64);
-}
-#endif
-
 static int ei_get_data(size_t offset, size_t length, float *out_ptr)
 {
     memcpy(out_ptr, ei_buf + offset, length * sizeof(float));
@@ -155,9 +131,6 @@ static void inference_task(void *arg)
     size_t int_min0 = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
     size_t ps_min0  = heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
     bool first = true;
-#if PREVIEW_EVERY_N_FRAMES > 0
-    uint32_t frame = 0;
-#endif
 
     while (1) {
         camera_fb_t *fb = esp_camera_fb_get();
@@ -178,12 +151,6 @@ static void inference_task(void *arg)
         gray_to_ei(fb->buf, fb->width, fb->height);
         esp_camera_fb_return(fb);
 
-#if PREVIEW_EVERY_N_FRAMES > 0
-        if (++frame % PREVIEW_EVERY_N_FRAMES == 0) {
-            send_frame_uart();
-        }
-#endif
-
         signal_t signal;
         signal.total_length = EI_W * EI_H;
         signal.get_data = &ei_get_data;
@@ -194,6 +161,20 @@ static void inference_task(void *arg)
             ESP_LOGE(TAG, "run_classifier failed: %d", res);
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
+        }
+
+        // klatka + ramki do przegladarki
+        {
+            preview_box_t pb[16];
+            int npb = 0;
+#if EI_CLASSIFIER_OBJECT_DETECTION
+            for (size_t i = 0; i < result.bounding_boxes_count && npb < 16; i++) {
+                const ei_impulse_result_bounding_box_t &bb = result.bounding_boxes[i];
+                if (bb.value == 0) continue;
+                pb[npb++] = { bb.label, bb.value, bb.x, bb.y, bb.width, bb.height };
+            }
+#endif
+            wifi_preview_update(gray_raw, pb, npb);
         }
 
         if (first) {
@@ -238,10 +219,18 @@ extern "C" void app_main(void)
         ESP_LOGE(TAG, "camera init failed: 0x%x", err);
         return;
     }
+    ei_buf = (float *)heap_caps_malloc(EI_W * EI_H * sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!ei_buf) {
+        ESP_LOGE(TAG, "brak PSRAM na bufor wejsciowy");
+        return;
+    }
     ESP_LOGI(TAG, "camera ready: %dx%d -> model %dx%d", CAM_WIDTH, CAM_HEIGHT, EI_W, EI_H);
 #ifdef EI_CLASSIFIER_TFLITE_LARGEST_ARENA_SIZE
     ESP_LOGI(TAG, "arena modelu: %d B", (int)EI_CLASSIFIER_TFLITE_LARGEST_ARENA_SIZE);
 #endif
+
+    // Najpierw WiFi + serwer HTTP (potrzebuja pamieci wewnetrznej), dopiero potem model.
+    wifi_preview_start(EI_W, EI_H);   // IP pojawi sie w logu
 
     if (xTaskCreatePinnedToCore(inference_task, "inference", 16384, nullptr, 5, nullptr, 1) != pdPASS) {
         ESP_LOGE(TAG, "nie udalo sie utworzyc zadania inferencji");
