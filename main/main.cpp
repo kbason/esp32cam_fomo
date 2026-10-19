@@ -18,22 +18,23 @@ static const char *TAG = "fomo";
 #define CAM_WIDTH   96
 #define CAM_HEIGHT  96
 
-#define CAM_PIN_PWDN   32
+// Piny kamery: ESP32-S3 CAM (OV3660), uklad jak w ESP32-S3-EYE / Freenove S3 CAM
+#define CAM_PIN_PWDN   -1
 #define CAM_PIN_RESET  -1
-#define CAM_PIN_XCLK    0
-#define CAM_PIN_SIOD   26
-#define CAM_PIN_SIOC   27
-#define CAM_PIN_D7     35
-#define CAM_PIN_D6     34
-#define CAM_PIN_D5     39
-#define CAM_PIN_D4     36
-#define CAM_PIN_D3     21
-#define CAM_PIN_D2     19
-#define CAM_PIN_D1     18
-#define CAM_PIN_D0      5
-#define CAM_PIN_VSYNC  25
-#define CAM_PIN_HREF   23
-#define CAM_PIN_PCLK   22
+#define CAM_PIN_XCLK   15
+#define CAM_PIN_SIOD    4
+#define CAM_PIN_SIOC    5
+#define CAM_PIN_D7     16
+#define CAM_PIN_D6     17
+#define CAM_PIN_D5     18
+#define CAM_PIN_D4     12
+#define CAM_PIN_D3     10
+#define CAM_PIN_D2      8
+#define CAM_PIN_D1      9
+#define CAM_PIN_D0     11
+#define CAM_PIN_VSYNC   6
+#define CAM_PIN_HREF    7
+#define CAM_PIN_PCLK   13
 
 #define EI_W  EI_CLASSIFIER_INPUT_WIDTH
 #define EI_H  EI_CLASSIFIER_INPUT_HEIGHT
@@ -58,7 +59,7 @@ static esp_err_t camera_init(void)
     cfg.pin_href = CAM_PIN_HREF;
     cfg.pin_pclk = CAM_PIN_PCLK;
 
-    // 10 MHz: przy 20 MHz DMA nie nadaza i klatki 96x96 sa obciete (FB-SIZE: 6144 != 9216)
+    // 10 MHz na start; na S3 mozna sprobowac 20 MHz, jesli klatki beda kompletne
     cfg.xclk_freq_hz = 10000000;
     cfg.ledc_timer = LEDC_TIMER_0;
     cfg.ledc_channel = LEDC_CHANNEL_0;
@@ -156,7 +157,9 @@ static void inference_task(void *arg)
         signal.get_data = &ei_get_data;
 
         ei_impulse_result_t result = { 0 };
+        heap_caps_check_integrity_all(true);
         EI_IMPULSE_ERROR res = run_classifier(&signal, &result, false);
+        heap_caps_check_integrity_all(true);
         if (res != EI_IMPULSE_OK) {
             ESP_LOGE(TAG, "run_classifier failed: %d", res);
             vTaskDelay(pdMS_TO_TICKS(500));

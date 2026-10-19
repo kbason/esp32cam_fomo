@@ -41,6 +41,6 @@ direct_dependencies:
 - espressif/esp-nn
 - espressif/esp32-camera
 - idf
-manifest_hash: 566d172b507f8c75f2c50ebc89d9b9e7a5c260076dd9ddbfaeeb5dc2ac97cabd
-target: esp32
+manifest_hash: bcc9546e15c36a40e72e0e3a436511ca136678869ad07db14d3f9985fe1c57b5
+target: esp32s3
 version: 2.0.0
